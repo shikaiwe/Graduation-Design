@@ -7,7 +7,7 @@ import os
 from datetime import datetime
 
 # 基础路径配置
-BASE_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'data')
+BASE_DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(__file__))), 'data_pipeline', 'data')
 COMPONENTS_FILE = os.path.join(BASE_DATA_DIR, 'components', 'hs300_components_cutoff_2024.csv')
 OUTPUT_DIR = os.path.join(BASE_DATA_DIR, 'daily_prices')
 
