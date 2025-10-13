@@ -30,7 +30,7 @@ class IndexComponents:
         # 创建index_components子目录
         self.index_components_dir = self.data_dir / "index_components"
         self.index_components_dir.mkdir(parents=True, exist_ok=True)
-        self.components_file = self.index_components_dir / "hs300_components.parquet"
+        self.components_file = self.index_components_dir / "hs300_components.csv"
     
     def get_latest_components(self) -> pd.DataFrame:
         """
@@ -51,7 +51,7 @@ class IndexComponents:
             if not components_df.empty:
                 logger.info(f"成功获取到 {len(components_df)} 只成分股")
                 # 保存数据
-                components_df.to_parquet(self.components_file, index=False)
+                components_df.to_csv(self.components_file, index=False, encoding='utf-8-sig')
                 return components_df
             else:
                 logger.error("所有接口均未获取到成分股数据")
@@ -70,7 +70,7 @@ class IndexComponents:
         """
         if self.components_file.exists():
             try:
-                components_df = pd.read_parquet(self.components_file)
+                components_df = pd.read_csv(self.components_file, encoding='utf-8-sig')
                 logger.info(f"从本地加载 {len(components_df)} 只成分股")
                 return components_df
             except Exception as e:

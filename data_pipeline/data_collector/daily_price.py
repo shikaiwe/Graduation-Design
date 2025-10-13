@@ -238,8 +238,8 @@ class DailyPriceCollector:
         if not date_str:
             date_str = datetime.now().strftime("%Y%m%d")
         
-        filename = self.price_dir / f"daily_prices_{date_str}.parquet"
-        df.to_parquet(filename, index=False)
+        filename = self.price_dir / f"daily_prices_{date_str}.csv"
+        df.to_csv(filename, index=False, encoding='utf-8-sig')
         logger.info(f"日频价格数据已保存至: {filename}")
     
     def collect_hs300_daily_data(self, sample_count: int = 10, start_date: str = None, end_date: str = None,
@@ -304,7 +304,7 @@ class DailyPriceCollector:
         logger.info("开始断点续传数据采集...")
         
         # 检查现有数据文件
-        existing_files = list(self.price_dir.glob("daily_prices_*.parquet"))
+        existing_files = list(self.price_dir.glob("daily_prices_*.csv"))
         
         if not existing_files:
             logger.info("未找到现有数据文件，开始全新采集")
@@ -316,7 +316,7 @@ class DailyPriceCollector:
         
         try:
             # 读取现有数据
-            existing_df = pd.read_parquet(latest_file)
+            existing_df = pd.read_csv(latest_file, encoding='utf-8-sig')
             
             # 获取已采集的股票代码
             collected_symbols = set(existing_df['股票代码'].unique()) if '股票代码' in existing_df.columns else set()
@@ -361,9 +361,9 @@ class DailyPriceCollector:
                     combined_df = pd.concat([existing_df, batch_data], ignore_index=True)
                     
                     # 保存合并后的数据
-                    filename = f"daily_prices_{start_year}_{end_year}.parquet"
+                    filename = f"daily_prices_{start_year}_{end_year}.csv"
                     filepath = self.price_dir / filename
-                    combined_df.to_parquet(filepath, index=False)
+                    combined_df.to_csv(filepath, index=False, encoding='utf-8-sig')
                     
                     # 更新现有数据引用
                     existing_df = combined_df
@@ -420,7 +420,7 @@ class DailyPriceCollector:
             logger.info(f"历史数据采集完成，共获取 {len(stock_data)} 条记录")
             logger.info(f"数据时间范围: {stock_data['日期'].min()} 至 {stock_data['日期'].max()}")
             logger.info(f"覆盖股票数量: {stock_data['股票代码'].nunique()}")
-            logger.info(f"数据文件: daily_prices_{date_str}.parquet")
+            logger.info(f"数据文件: daily_prices_{date_str}.csv")
             
             # 更新进度为完成
             if progress_callback:

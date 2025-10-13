@@ -226,7 +226,13 @@ $RECYCLE.BIN/
 论文文件.zip
 
 # Keep the reference folder but exclude any temporary files in it
-参考文献/*.tmp
+参考文献/
+
+# Keep data folders but ignore contents
+data/daily_prices/**
+!data/daily_prices/.gitkeep
+data/index_components/**
+!data/index_components/.gitkeep*.tmp
 参考文献/*.temp
 
 #pdf

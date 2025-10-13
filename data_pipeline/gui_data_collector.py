@@ -385,14 +385,14 @@ class DataCollectorGUI:
             collector = DailyPriceCollector()
             
             # 检查数据文件
-            existing_files = list(collector.price_dir.glob("daily_prices_*.parquet"))
+            existing_files = list(collector.price_dir.glob("daily_prices_*.csv"))
             if not existing_files:
                 self.update_status("未找到数据文件")
                 return
                 
             # 读取最新文件
             latest_file = max(existing_files, key=lambda x: x.stat().st_mtime)
-            df = pd.read_parquet(latest_file)
+            df = pd.read_csv(latest_file, encoding='utf-8-sig')
             
             # 获取统计信息
             total_records = len(df)
@@ -419,7 +419,7 @@ class DataCollectorGUI:
             from tkinter import filedialog
             
             collector = DailyPriceCollector()
-            existing_files = list(collector.price_dir.glob("daily_prices_*.parquet"))
+            existing_files = list(collector.price_dir.glob("daily_prices_*.csv"))
             if not existing_files:
                 messagebox.showwarning("警告", "未找到数据文件")
                 return
@@ -433,7 +433,7 @@ class DataCollectorGUI:
             
             if file_path:
                 latest_file = max(existing_files, key=lambda x: x.stat().st_mtime)
-                df = pd.read_parquet(latest_file)
+                df = pd.read_csv(latest_file, encoding='utf-8-sig')
                 df.to_csv(file_path, index=False, encoding='utf-8-sig')
                 
                 self.log_info(f"数据已导出到: {file_path}")
