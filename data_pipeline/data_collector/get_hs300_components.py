@@ -26,8 +26,18 @@ def get_hs300_components():
     try:
         logger.info("开始获取沪深300指数成分股列表...")
         
-        # 使用akshare接口获取沪深300成分股
-        hs300_df = ak.index_stock_cons_sina(symbol="000300")
+        # 优先使用ak.index_stock_cons接口获取成分股数据（直接包含纳入日期）
+        hs300_df = ak.index_stock_cons(symbol="000300")
+        
+        if hs300_df.empty:
+            logger.warning("ak.index_stock_cons接口未获取到数据，尝试中证指数公司接口...")
+            # 备用方案：使用中证指数公司接口
+            hs300_df = ak.index_stock_cons_csindex(symbol="000300")
+            
+        if hs300_df.empty:
+            logger.warning("中证指数公司接口未获取到数据，尝试新浪接口...")
+            # 备用方案：使用新浪接口
+            hs300_df = ak.index_stock_cons_sina(symbol="000300")
         
         if hs300_df.empty:
             logger.warning("未获取到沪深300成分股数据")
@@ -63,23 +73,37 @@ def format_components_data(df):
     # 获取当前时间
     current_time = datetime.now().strftime("%Y/%m/%d %H:%M")
     
+    # 判断数据来源
+    has_inclusion_date = '纳入日期' in df.columns  # ak.index_stock_cons接口包含纳入日期字段
+    is_csindex_data = '日期' in df.columns  # 中证指数公司接口包含日期字段
+    
     # 处理每一只股票
     for _, row in df.iterrows():
-        # 获取股票代码（保持原始格式，不进行补零或去零操作）
-        stock_code = str(row.get('code', ''))
-        
-        # 获取股票名称
-        stock_name = row.get('name', '')
-        
-        # 由于akshare接口不提供纳入日期信息，我们使用默认值
-        # 在实际应用中，可能需要从其他数据源获取准确的纳入日期
-        inclusion_date = "2024-12-16"  # 默认纳入日期
+        # 根据数据来源获取股票代码和名称
+        if has_inclusion_date:
+            # ak.index_stock_cons接口
+            stock_code = str(row.get('品种代码', ''))
+            stock_name = row.get('品种名称', '')
+            # 使用接口提供的纳入日期
+            inclusion_date = row.get('纳入日期', '2024-12-16')
+            data_source = "ak_cons"
+        elif is_csindex_data:
+            # 中证指数公司接口
+            stock_code = str(row.get('成分券代码', ''))
+            stock_name = row.get('成分券名称', '')
+            # 使用中证指数公司提供的纳入日期
+            inclusion_date = row.get('日期', '2024-12-16')
+            data_source = "csindex"
+        else:
+            # 新浪接口
+            stock_code = str(row.get('code', ''))
+            stock_name = row.get('name', '')
+            # 新浪接口不提供纳入日期，使用默认值
+            inclusion_date = "2024-12-16"
+            data_source = "sina"
         
         # 指数代码固定为300
         index_code = "300"
-        
-        # 数据来源固定为backup
-        data_source = "backup"
         
         formatted_data.append({
             '股票代码': stock_code,
@@ -94,6 +118,36 @@ def format_components_data(df):
     formatted_df = pd.DataFrame(formatted_data)
     
     return formatted_df
+
+def remove_duplicates(df):
+    """
+    去除重复的股票数据
+    
+    Args:
+        df (pandas.DataFrame): 原始成分股数据
+        
+    Returns:
+        pandas.DataFrame: 去重后的成分股数据
+    """
+    if df.empty:
+        return df
+    
+    # 记录去重前的数据量
+    original_count = len(df)
+    
+    # 根据股票代码进行去重，保留最后出现的记录
+    df_deduplicated = df.drop_duplicates(subset=['股票代码'], keep='last')
+    
+    # 记录去重后的数据量
+    deduplicated_count = len(df_deduplicated)
+    
+    # 记录去重信息
+    if original_count > deduplicated_count:
+        logger.info(f"数据去重完成: 原始数据 {original_count} 条，去重后 {deduplicated_count} 条，移除 {original_count - deduplicated_count} 条重复数据")
+    else:
+        logger.info("数据无重复项")
+    
+    return df_deduplicated
 
 def save_components_to_csv(df, output_file=None):
     """
@@ -110,6 +164,9 @@ def save_components_to_csv(df, output_file=None):
         logger.warning("数据为空，不进行保存")
         return ""
     
+    # 去重处理
+    df = remove_duplicates(df)
+    
     # 如果没有指定输出文件，使用默认路径
     if output_file is None:
         # 创建输出目录
@@ -117,9 +174,8 @@ def save_components_to_csv(df, output_file=None):
                                  'data_pipeline', 'data', 'components')
         os.makedirs(output_dir, exist_ok=True)
         
-        # 生成带时间戳的文件名
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_file = os.path.join(output_dir, f"hs300_components_{timestamp}.csv")
+        # 使用固定的文件名
+        output_file = os.path.join(output_dir, "hs300_components_full.csv")
     
     try:
         # 保存数据
