@@ -227,6 +227,8 @@ $RECYCLE.BIN/
 
 # Keep the reference folder but exclude any temporary files in it
 参考文献/
+*.docx
+
 
 # Keep data folders but ignore contents
 data/daily_prices/**
