@@ -162,6 +162,7 @@ cython_debug/
 # VS Code
 .vscode/
 *.code-workspace
+.codebuddy
 
 # Data files (exclude large data files but keep small configs)
 data_pipeline/data/*
