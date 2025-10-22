@@ -110,6 +110,9 @@ class FundamentalFactors:
             batches_dir.mkdir(parents=True, exist_ok=True)
 
             # 2. 按需遍历，获取并保存新数据
+            from tqdm import tqdm
+            
+            logger.info("开始获取各报告期财务数据...")
             for date in tqdm(report_dates_to_fetch, desc="获取并保存各报告期财务数据"):
                 try:
                     zcfz_df = ak.stock_zcfz_em(date=date)
@@ -150,12 +153,13 @@ class FundamentalFactors:
                     continue
             
             # 3. 从本地加载所有需要的批次文件
+            logger.info("开始加载本地批次文件...")
             all_financial_data = []
-            for date in all_report_dates:
+            for date in tqdm(all_report_dates, desc="加载批次文件"):
                 batch_file_path = batches_dir / f"fundamental_factors_batch_{date}.csv"
                 if batch_file_path.exists():
                     try:
-                        batch_df = pd.read_csv(batch_file_path)
+                        batch_df = pd.read_csv(batch_file_path, encoding='utf-8-sig')
                         batch_df['日期'] = pd.to_datetime(date, format='%Y%m%d')
                         all_financial_data.append(batch_df)
                     except Exception as e:
@@ -258,49 +262,64 @@ class FundamentalFactors:
             else:
                 df['净利润_TTM'] = np.nan
 
-            # 准备获取报告期末收盘价：对每支股票的所有报告期末日期，抓取该日期±3交易日内数据，取>=报告期末的首个交易日收盘
+            # 准备获取报告期末收盘价：使用本地股价数据文件
             unique_codes = df['股票代码'].dropna().unique().tolist()
             report_dates_map = df.groupby('股票代码')['日期'].unique().to_dict()
 
             close_records = []
-            for code in unique_codes:
+            
+            # 加载本地股价数据文件
+            try:
+                price_file_path = "e:/Design/Graduation-Design/data_pipeline/data/daily_prices/Merge/hs300_daily_prices_merged.csv"
+                price_data = pd.read_csv(price_file_path, encoding='utf-8-sig')
+                price_data['date'] = pd.to_datetime(price_data['date'])
+                price_data['股票代码'] = price_data['股票代码'].astype(str)
+                logger.info(f"成功加载本地股价数据，共{len(price_data)}行")
+            except Exception as e:
+                logger.error(f"加载本地股价数据文件失败: {e}")
+                price_data = pd.DataFrame()
+
+            logger.info("开始处理股价数据...")
+            for code in tqdm(unique_codes, desc="处理股价数据"):
                 dates = sorted(pd.to_datetime(report_dates_map.get(code, [])))
                 if not dates:
                     continue
-                # 将日期窗口合并为一次最小范围抓取以减少请求量
-                start_dt = (min(dates) - pd.Timedelta(days=5)).strftime('%Y%m%d')
-                end_dt = (max(dates) + pd.Timedelta(days=5)).strftime('%Y%m%d')
-                try:
-                    # symbol需含交易所后缀，简单处理：上证以'600/601/603/605'为sh，深证以'000/001/002/003/300'为sz
-                    sym = code
-                    if code.startswith(('600', '601', '603', '605')):
-                        symbol = f"sh{code}"
-                    else:
-                        symbol = f"sz{code}"
-                    kline = ak.stock_zh_a_hist(symbol=symbol, period='daily', start_date=start_dt, end_date=end_dt, adjust='qfq')
-                    if kline is None or kline.empty:
-                        continue
-                    # 规范列
-                    if '日期' not in kline.columns and '日期' in kline.rename(columns={'交易日期':'日期'}).columns:
-                        kline = kline.rename(columns={'交易日期': '日期'})
-                    kline['日期'] = pd.to_datetime(kline['日期'])
-                    price_col = '收盘'
-                    if price_col not in kline.columns:
-                        # 兼容英文列
-                        if 'close' in kline.columns:
-                            price_col = 'close'
-                    for rd in dates:
+                
+                # 为每个报告期单独获取股价数据，确保时间精确对齐
+                for rd in dates:
+                    try:
+                        # 从本地数据中查找该股票在报告期后的首个交易日收盘价
+                        stock_price_data = price_data[price_data['股票代码'] == str(code)]
+                        if stock_price_data.empty:
+                            logger.warning(f"股票{code}在本地股价数据中未找到")
+                            continue
+                        
                         # 找到>=报告期末的首个交易日
-                        sub = kline[kline['日期'] >= rd].sort_values('日期').head(1)
-                        if not sub.empty and price_col in sub.columns:
-                            close_price = pd.to_numeric(sub.iloc[0][price_col], errors='coerce')
-                            close_date = sub.iloc[0]['日期']
+                        sub = stock_price_data[stock_price_data['date'] >= rd].sort_values('date').head(1)
+                        if not sub.empty and 'close' in sub.columns:
+                            close_price = pd.to_numeric(sub.iloc[0]['close'], errors='coerce')
+                            close_date = sub.iloc[0]['date']
+                            
+                            # 检查时间对齐是否合理（报告期与交易日差距不应过大）
+                            days_diff = (close_date - rd).days
+                            if days_diff > 30:  # 如果差距超过30天，可能数据有问题
+                                logger.warning(f"股票{code}报告期{rd}与交易日{close_date}时间差距过大: {days_diff}天")
+                                continue
+                                
                             close_records.append((code, rd, close_date, close_price))
-                except Exception:
-                    continue
+                            logger.info(f"股票{code}报告期{rd}的收盘价: {close_price} (交易日: {close_date})")
+                        else:
+                            logger.warning(f"股票{code}报告期{rd}未找到合适的收盘价数据")
+                    except Exception as e:
+                        logger.warning(f"获取股票{code}报告期{rd}的股价数据失败: {e}")
+                        continue
             if close_records:
                 close_df = pd.DataFrame(close_records, columns=['股票代码', '日期', '对齐交易日', '报告期末收盘价'])
-                df = pd.merge(df, close_df, on=['股票代码', '日期'], how='left')
+                # 确保合并前检查数据完整性
+                if not df.empty:
+                    df = pd.merge(df, close_df, on=['股票代码', '日期'], how='left')
+                else:
+                    df['报告期末收盘价'] = np.nan
             else:
                 df['报告期末收盘价'] = np.nan
 
@@ -311,19 +330,154 @@ class FundamentalFactors:
             else:
                 df['PE'] = np.nan
 
-            # 计算PE_TTM（总市值 / 净利润_TTM）
-            # 历史口径总市值若缺失，则置NaN并在口径说明中注明
-            if '总市值' in df.columns:
-                df['PE_TTM'] = np.where((df['净利润_TTM'] > 0) & (~df['净利润_TTM'].isna()) & (~df['总市值'].isna()),
-                                        df['总市值'] / df['净利润_TTM'], np.nan)
+            # 使用东方财富接口获取的总市值数据
+            if '总市值_em' in df.columns:
+                df['总市值'] = df['总市值_em'].copy()
+                logger.info(f"使用东方财富接口总市值数据，共{len(df[~df['总市值'].isna()])}条有效记录")
+            else:
+                df['总市值'] = np.nan
+                logger.warning("总市值_em列不存在，总市值设置为NaN")
+            
+            # 使用东方财富stock_value_em接口获取估值数据
+            def get_stock_value_data(code):
+                """获取个股估值数据
+                
+                Args:
+                    code: 股票代码
+                    
+                Returns:
+                    pd.DataFrame: 估值数据DataFrame
+                """
+                try:
+                    # 使用东方财富接口获取个股估值数据
+                    value_data = ak.stock_value_em(symbol=code)
+                    
+                    if not value_data.empty:
+                        # 确保日期列存在并转换为日期类型
+                        if '日期' in value_data.columns:
+                            value_data['日期'] = pd.to_datetime(value_data['日期']).dt.strftime('%Y-%m-%d')
+                        logger.info(f"成功获取股票{code}的估值数据，共{len(value_data)}条记录")
+                        return value_data
+                    else:
+                        logger.warning(f"股票{code}的估值数据为空")
+                        return pd.DataFrame()
+                except Exception as e:
+                    logger.warning(f"获取股票{code}估值数据失败: {e}")
+                    return pd.DataFrame()
+            
+            # 初始化东方财富接口返回的估值指标列
+            em_metrics = ['PE_TTM_em', 'PE静_em', '市净率_em', 'PEG值_em', '市现率_em', '市销率_em', 
+                         '总市值_em', '流通市值_em', '总股本_em', '流通股本_em']
+            for metric in em_metrics:
+                df[metric] = np.nan
+            
+            # 批量获取各股票的估值数据
+            logger.info("开始使用东方财富接口获取估值数据...")
+            for code in tqdm(unique_codes, desc="获取估值数据"):
+                try:
+                    # 获取该股票的估值数据
+                    value_data = get_stock_value_data(code)
+                    
+                    if not value_data.empty and not df[df['股票代码'] == code].empty:
+                        # 获取该股票的所有报告期
+                        stock_dates = df[df['股票代码'] == code]['日期'].unique()
+                        
+                        for report_date in stock_dates:
+                            # 查找最接近报告期的估值数据
+                            if '日期' in value_data.columns:
+                                # 转换报告期为字符串格式以便比较
+                                report_date_str = pd.to_datetime(report_date).strftime('%Y-%m-%d')
+                                
+                                # 筛选在报告期之前或等于报告期的记录
+                                valid_dates = value_data[value_data['日期'] <= report_date_str]
+                                
+                                if not valid_dates.empty:
+                                    # 获取最接近报告期的记录
+                                    closest_record = valid_dates.iloc[-1]
+                                    
+                                    # 计算日期差距
+                                    date_diff = (pd.to_datetime(report_date_str) - 
+                                                pd.to_datetime(closest_record['日期'])).days
+                                    
+                                    # 如果差距在合理范围内（30天内），则使用该数据
+                                    if date_diff <= 30:
+                                        # 更新对应报告期的估值指标
+                                        mask = (df['股票代码'] == code) & (df['日期'] == report_date)
+                                        
+                                        # 映射东方财富接口返回的字段到自定义字段
+                                        field_mapping = {
+                                            '市盈率(TTM)': 'PE_TTM_em',
+                                            '市盈率(静)': 'PE静_em',
+                                            '市净率': '市净率_em',
+                                            'PEG': 'PEG值_em',
+                                            '市现率': '市现率_em',
+                                            '市销率': '市销率_em',
+                                            '总市值': '总市值_em',
+                                            '流通市值': '流通市值_em',
+                                            '总股本': '总股本_em',
+                                            '流通股本': '流通股本_em'
+                                        }
+                                        
+                                        for source_field, target_field in field_mapping.items():
+                                            if source_field in closest_record.index and pd.notna(closest_record[source_field]):
+                                                try:
+                                                    value = float(closest_record[source_field])
+                                                    df.loc[mask, target_field] = value
+                                                except (ValueError, TypeError):
+                                                    logger.warning(f"股票{code}报告期{report_date}字段{source_field}值转换失败")
+                                        
+                                        logger.info(f"股票{code}报告期{report_date}使用东方财富估值数据（日期差:{date_diff}天）")
+                                    else:
+                                        logger.warning(f"股票{code}报告期{report_date}无合适的估值数据，最近数据日期差:{date_diff}天")
+                except Exception as e:
+                    logger.warning(f"处理股票{code}估值数据失败: {e}")
+            
+            # 计算PE_TTM（完全使用东方财富接口数据）
+            if 'PE_TTM_em' in df.columns:
+                df['PE_TTM'] = df['PE_TTM_em'].copy()
+                logger.info(f"使用东方财富接口PE_TTM数据，共{len(df[~df['PE_TTM'].isna()])}条有效记录")
             else:
                 df['PE_TTM'] = np.nan
+                logger.warning("PE_TTM_em列不存在，PE_TTM设置为NaN")
 
             # 透明与可验证：标注口径
+            # 统一使用东方财富接口数据
+            df['pe_data_source'] = '东方财富接口'
+            df['pb_data_source'] = '东方财富接口'
+            
+            # 确保所有东方财富接口估值指标都被包含在最终结果中
+            # 将东方财富接口指标重命名为标准字段名，便于后续使用
+            em_to_standard_mapping = {
+                'PE静_em': 'PE静',
+                'PEG值_em': 'PEG',
+                '市现率_em': '市现率',
+                '市销率_em': '市销率',
+                '流通市值_em': '流通市值',
+                '流通股本_em': '流通股本'
+            }
+            
+            for em_field, standard_field in em_to_standard_mapping.items():
+                if em_field in df.columns:
+                    df[standard_field] = df[em_field].copy()
+                    logger.info(f"使用东方财富接口{standard_field}数据，共{len(df[~df[standard_field].isna()])}条有效记录")
+                else:
+                    df[standard_field] = np.nan
+                    logger.warning(f"{em_field}列不存在，{standard_field}设置为NaN")
+            
             df['估值口径说明'] = (
                 np.where(~df['PE'].isna(), 'PE=报告期末收盘价/基本每股收益; ', '') +
-                np.where(~df['PE_TTM'].isna(), 'PE_TTM=报告期末总市值/净利润TTM; ', '') +
-                np.where(df['PE_TTM'].isna(), 'PE_TTM缺失：期末总市值不可得; ', '')
+                'PE_TTM=东方财富接口数据; ' +
+                '市净率=东方财富接口数据; ' +
+                'PE静=东方财富接口数据; ' +
+                'PEG=东方财富接口数据; ' +
+                '市现率=东方财富接口数据; ' +
+                '市销率=东方财富接口数据; ' +
+                '流通市值=东方财富接口数据; ' +
+                '流通股本=东方财富接口数据; ' +
+                np.where(df['PE_TTM'].isna(), 'PE_TTM缺失：东方财富接口数据不可得; ', '') +
+                '数据来源标识：pe_data_source列（东方财富接口）; ' +
+                'pb_data_source列（东方财富接口）; ' +
+                '时间对齐：股价按报告期末后首个交易日; '
             )
 
             return df
@@ -357,28 +511,27 @@ class FundamentalFactors:
         try:
             df = df.copy()
             
-            # 合并股价数据来计算市净率
-            if not price_data.empty and '日期' in price_data.columns and '收盘价' in price_data.columns:
-                # 获取最新的股价数据
-                latest_prices = price_data.groupby('股票代码').last().reset_index()[['股票代码', '收盘价']]
+            # 使用东方财富接口返回的市净率数据
+            if '市净率_em' in df.columns:
+                df['市净率'] = df['市净率_em'].copy()
+                logger.info(f"使用东方财富接口市净率数据，共{len(df[~df['市净率'].isna()])}条有效记录")
+            else:
+                df['市净率'] = np.nan
+                logger.warning("市净率_em列不存在，市净率设置为NaN")
                 
-                # 合并股价数据
-                df_with_price = pd.merge(df, latest_prices, on='股票代码', how='left')
+            # 计算市净率分位数
+            if '市净率' in df.columns:
+                df['市净率分位数'] = df.groupby('日期')['市净率'].transform(
+                    lambda x: x.rank(pct=True) if not x.isna().all() else np.nan
+                )
                 
-                # 计算市净率（市净率 = 股价 / 每股净资产）
-                if '所有者权益' in df_with_price.columns and '收盘价' in df_with_price.columns:
-                    # 简化计算：市净率 = 股价 / (所有者权益 / 总股本)，这里假设总股本为1亿
-                    df_with_price['市净率'] = df_with_price['收盘价'] / (df_with_price['所有者权益'] / 100000000)
-                    
-                    # 计算市净率分位数
-                    df_with_price['pb_ratio_quantile'] = df_with_price.groupby('日期')['市净率'].transform(
-                        lambda x: pd.qcut(x, 5, labels=False, duplicates='drop')
-                    )
-                    
-                    # 计算市净率变化率
-                    df_with_price['pb_ratio_change'] = df_with_price.groupby('股票代码')['市净率'].pct_change()
-                    
-                    df = df_with_price
+                # 计算市净率变化率
+                df['市净率变化率'] = df.groupby('股票代码')['市净率'].pct_change()
+                
+                # 添加数据来源标识
+                df['pb_data_source'] = '东方财富接口'
+                
+                logger.info(f"市净率计算完成，有效记录数：{len(df[~df['市净率'].isna()])}")
             
             self._log_step('calculate_pb_ratio', {
                 'pb_ratio_available': '市净率' in df.columns
@@ -482,36 +635,52 @@ class FundamentalFactors:
             pd.DataFrame: 包含所有基本因子的数据
         """
         try:
+            from tqdm import tqdm
+            
             logger.info("开始计算基本因子...")
             
-            # 获取财务数据
-            df = self.get_financial_data(stock_codes, start_date, end_date)
-            
-            if df.empty:
-                logger.warning("未获取到财务数据，返回空DataFrame")
+            # 创建整体进度条
+            with tqdm(total=5, desc="整体进度") as pbar:
+                # 获取财务数据
+                pbar.set_description("获取财务数据")
+                df = self.get_financial_data(stock_codes, start_date, end_date)
+                pbar.update(1)
+                
+                if df.empty:
+                    logger.warning("未获取到财务数据，返回空DataFrame")
+                    pbar.update(4)  # 跳过剩余步骤
+                    return df
+                
+                # 计算估值指标（使用新方法）
+                pbar.set_description("计算估值指标")
+                df = self.calculate_valuation_metrics(df)
+                pbar.update(1)
+                
+                # 计算市净率因子（需要股价数据）
+                pbar.set_description("计算市净率因子")
+                df = self.calculate_pb_ratio(df, price_data)
+                pbar.update(1)
+                
+                # 计算ROE/ROA因子
+                pbar.set_description("计算ROE/ROA因子")
+                df = self.calculate_roe_roa(df)
+                pbar.update(1)
+                
+                # 计算增长率因子
+                pbar.set_description("计算增长率因子")
+                df = self.calculate_growth_rates(df)
+                pbar.update(1)
+                
+                # 完成处理记录
+                self.processing_log['end_time'] = datetime.now().isoformat()
+                self.processing_log['total_rows'] = str(len(df))
+                self.processing_log['factors_calculated'] = [
+                    col for col in df.columns if col not in ['日期', '股票代码']
+                ]
+                
+                pbar.set_description("基本因子计算完成")
+                logger.info("基本因子计算完成！")
                 return df
-            
-            # 计算市盈率因子（需要股价数据）
-            df = self.calculate_pe_ratio(df, price_data)
-            
-            # 计算市净率因子（需要股价数据）
-            df = self.calculate_pb_ratio(df, price_data)
-            
-            # 计算ROE/ROA因子
-            df = self.calculate_roe_roa(df)
-            
-            # 计算增长率因子
-            df = self.calculate_growth_rates(df)
-            
-            # 完成处理记录
-            self.processing_log['end_time'] = datetime.now().isoformat()
-            self.processing_log['total_rows'] = str(len(df))
-            self.processing_log['factors_calculated'] = [
-                col for col in df.columns if col not in ['日期', '股票代码']
-            ]
-            
-            logger.info("基本因子计算完成！")
-            return df
             
         except Exception as e:
             logger.error(f"批量计算基本因子失败: {str(e)}")
@@ -531,17 +700,18 @@ def main():
     """主函数示例"""
     # 配置参数
     config = {
-        'data_source': 'akshare'
+        'data_source': 'akshare',
+        'output_base_dir': Path('data_pipeline/data/features')
     }
     
     # 创建基本因子计算器
     calculator = FundamentalFactors(config)
     
     try:
-        # 读取沪深300成分股
-        components_file = "data_pipeline/data/components/hs300_components_full.csv"
+        # 读取沪深300成分股（使用cutoff_2024文件）
+        components_file = "data_pipeline/data/components/hs300_components_cutoff_2024.csv"
         components_df = pd.read_csv(components_file)
-        stock_codes = components_df['股票代码'].tolist()[:10]  # 测试用前10只股票
+        stock_codes = components_df['股票代码'].tolist()  # 使用所有股票代码
         
         # 计算基本因子
         start_date = "2019-01-01"

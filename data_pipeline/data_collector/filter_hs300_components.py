@@ -57,7 +57,7 @@ def filter_hs300_components_by_date(input_file, output_file, cutoff_year=2025):
         os.makedirs(os.path.dirname(output_file), exist_ok=True)
         
         # 保存筛选结果
-        filtered_df.to_csv(output_file, index=False, encoding='utf-8')
+        filtered_df.to_csv(output_file, index=False, encoding='utf-8-sig')
         print(f"筛选结果已保存至: {output_file}")
         
         # 显示前几行筛选结果
@@ -66,7 +66,7 @@ def filter_hs300_components_by_date(input_file, output_file, cutoff_year=2025):
     else:
         print("警告: 没有找到符合筛选条件的数据")
         # 创建空的输出文件
-        filtered_df.to_csv(output_file, index=False, encoding='utf-8')
+        filtered_df.to_csv(output_file, index=False, encoding='utf-8-sig')
         print(f"已创建空的输出文件: {output_file}")
     
     return filtered_rows, total_rows
