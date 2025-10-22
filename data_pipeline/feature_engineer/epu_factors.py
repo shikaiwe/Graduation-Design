@@ -8,9 +8,11 @@ EPU因子计算模块
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Sequence, Tuple
 import json
 from datetime import datetime
+
+from utils.interpolation import InterpolationConfig, convert_monthly_to_daily
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -99,6 +101,11 @@ class EPUFactors:
             
             # 删除空值
             epu_data = epu_data.dropna(subset=['epu'])
+
+            # 按时间范围过滤：2019-01-01 至 2024-12-31（生产要求）
+            start_date = pd.Timestamp('2019-01-01')
+            end_date = pd.Timestamp('2024-12-31')
+            epu_data = epu_data[(epu_data['date'] >= start_date) & (epu_data['date'] <= end_date)]
             
             self._log_step('load_epu_data', {
                 'original_columns': useful_columns,
@@ -206,12 +213,18 @@ class EPUFactors:
             logger.error(f"计算波动率因子失败: {str(e)}")
             raise
     
-    def process_all_factors(self) -> pd.DataFrame:
+    def process_all_factors(
+        self,
+        trading_calendar: Optional[Sequence[pd.Timestamp]] = None
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         批量计算所有EPU因子
-        
+
+        参数:
+            trading_calendar: 交易日历，可为空
+
         返回:
-            pd.DataFrame: 包含所有EPU因子的数据
+            Tuple[pd.DataFrame, pd.DataFrame]: (月度EPU数据, 日度插值数据)
         """
         try:
             logger.info("开始计算EPU因子...")
@@ -221,7 +234,7 @@ class EPUFactors:
             
             if df.empty:
                 logger.warning("未加载到EPU数据，返回空DataFrame")
-                return df
+                return df, pd.DataFrame()
             
             # 计算滞后因子
             df = self.calculate_lag_factors(df)
@@ -235,18 +248,39 @@ class EPUFactors:
             # 重命名日期列为标准格式
             df = df.rename(columns={'date': '日期'})
             
+            value_columns = [
+                col for col in df.columns
+                if col not in {"日期", "year", "month"}
+            ]
+            interpolation_config = InterpolationConfig(
+                method="linear",
+                limit_direction="both",
+                fill_strategy="both",
+                preserve_monthly=True
+            )
+            df_daily = convert_monthly_to_daily(
+                monthly_df=df,
+                date_column="日期",
+                value_columns=value_columns,
+                daily_calendar=trading_calendar,
+                config=interpolation_config
+            )
+
+            self.processing_log['daily_rows'] = str(len(df_daily))
+            self.processing_log['daily_columns'] = df_daily.columns.tolist()
+
             # 完成处理记录
             self.processing_log['end_time'] = datetime.now().isoformat()
             self.processing_log['total_rows'] = str(len(df))
             self.processing_log['factors_calculated'] = df.columns.tolist()
-            
+
             logger.info("EPU因子计算完成！")
-            return df
+            return df, df_daily
             
         except Exception as e:
             logger.error(f"批量计算EPU因子失败: {str(e)}")
             raise
-    
+
     def save_processing_log(self, file_path: str):
         """保存处理日志到文件"""
         try:
@@ -271,18 +305,25 @@ def main():
     
     try:
         # 计算EPU因子
-        df_epu_factors = calculator.process_all_factors()
+        df_epu, df_epu_daily = calculator.process_all_factors()
         
-        if not df_epu_factors.empty:
-            # 保存结果
+        saved_any = False
+        if not df_epu.empty:
+            # 保存月度结果
             output_file = "data_pipeline/data/features/epu_factors.csv"
-            df_epu_factors.to_csv(output_file, index=False, encoding='utf-8-sig')
+            df_epu.to_csv(output_file, index=False, encoding='utf-8-sig')
+            saved_any = True
+        if not df_epu_daily.empty:
+            # 保存日度插值结果
+            output_file_daily = "data_pipeline/data/features/epu_factors_daily.csv"
+            df_epu_daily.to_csv(output_file_daily, index=False, encoding='utf-8-sig')
+            saved_any = True
             
+        if saved_any:
             # 保存处理日志
             log_file = "data_pipeline/data/logs/epu_factors_processing_log.json"
             calculator.save_processing_log(log_file)
-            
-            logger.info(f"EPU因子计算完成！结果已保存到: {output_file}")
+            logger.info("EPU因子计算完成！结果已保存")
         else:
             logger.warning("未生成EPU因子数据")
         

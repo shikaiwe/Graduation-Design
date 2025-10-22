@@ -8,11 +8,13 @@
 import pandas as pd
 import numpy as np
 import logging
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Sequence, Tuple
 import json
 from datetime import datetime, timedelta
 import akshare as ak
 import requests
+
+from utils.interpolation import InterpolationConfig, convert_monthly_to_daily
 
 # 配置日志
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -405,25 +407,31 @@ class MacroFactors:
             })
             
             return macro_df
-            
+
         except Exception as e:
             logger.error(f"合并宏观数据失败: {str(e)}")
             raise
-    
-    def process_all_factors(self, start_date: str, end_date: str) -> pd.DataFrame:
+
+    def process_all_factors(
+        self,
+        start_date: str,
+        end_date: str,
+        trading_calendar: Optional[Sequence[pd.Timestamp]] = None
+    ) -> Tuple[pd.DataFrame, pd.DataFrame]:
         """
         批量计算所有宏观因子
         
         参数:
             start_date: 开始日期
             end_date: 结束日期
-            
+            trading_calendar: 交易日历，可为空
+
         返回:
-            pd.DataFrame: 包含所有宏观因子的数据
+            Tuple[pd.DataFrame, pd.DataFrame]: (月度宏观数据, 日度插值数据)
         """
         try:
             logger.info("开始计算宏观因子...")
-            
+
             # 获取各宏观数据
             gdp_data = self.get_gdp_data(start_date, end_date)
             cpi_data = self.get_cpi_data(start_date, end_date)
@@ -435,7 +443,7 @@ class MacroFactors:
             
             if macro_df.empty:
                 logger.warning("未获取到宏观数据，返回空DataFrame")
-                return macro_df
+                return macro_df, pd.DataFrame()
             
             # 计算增长率因子
             macro_df = self.calculate_growth_factors(macro_df)
@@ -443,13 +451,35 @@ class MacroFactors:
             # 计算滞后因子
             macro_df = self.calculate_lag_factors(macro_df)
             
+            # 生成日频插值数据
+            value_columns = [
+                col for col in macro_df.columns
+                if col not in {"日期", "季度", "月份"}
+            ]
+            interpolation_config = InterpolationConfig(
+                method="linear",
+                limit_direction="both",
+                fill_strategy="both",
+                preserve_monthly=True
+            )
+            macro_daily_df = convert_monthly_to_daily(
+                monthly_df=macro_df,
+                date_column="日期",
+                value_columns=value_columns,
+                daily_calendar=trading_calendar,
+                config=interpolation_config
+            )
+
+            self.processing_log['daily_rows'] = str(len(macro_daily_df))
+            self.processing_log['daily_columns'] = macro_daily_df.columns.tolist()
+
             # 完成处理记录
             self.processing_log['end_time'] = datetime.now().isoformat()
             self.processing_log['total_rows'] = str(len(macro_df))
             self.processing_log['factors_calculated'] = macro_df.columns.tolist()
-            
+
             logger.info("宏观因子计算完成！")
-            return macro_df
+            return macro_df, macro_daily_df
             
         except Exception as e:
             logger.error(f"批量计算宏观因子失败: {str(e)}")

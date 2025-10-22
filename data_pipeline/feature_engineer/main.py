@@ -10,15 +10,12 @@ import sys
 import pandas as pd
 import logging
 from datetime import datetime
-import sys
-import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
 from technical_indicators import TechnicalIndicators
 from fundamental_factors import FundamentalFactors
 from macro_factors import MacroFactors
 from epu_factors import EPUFactors
 from factor_selection import FactorSelection
+
 
 # 配置日志
 logging.basicConfig(
@@ -124,10 +121,11 @@ def run_feature_engineering_pipeline():
         
         # 初始化默认值
         stock_codes = ['000001', '000002', '000858']  # 示例股票代码
-        start_date = '2020-01-01'
+        start_date = '2019-01-01'
         end_date = '2024-12-31'
         price_data = pd.DataFrame()
-        
+        trading_calendar = None
+
         if os.path.exists(tech_input_file):
             df_tech = tech_calculator.load_data(tech_input_file)
             if validate_data_structure(df_tech):
@@ -141,6 +139,7 @@ def run_feature_engineering_pipeline():
                 start_date = df_tech['date'].min().strftime('%Y-%m-%d')
                 end_date = df_tech['date'].max().strftime('%Y-%m-%d')
                 price_data = df_tech[['date', '股票代码', 'close']].rename(columns={'date': '日期'})
+                trading_calendar = df_tech['date'].drop_duplicates().sort_values().to_list()
             else:
                 logger.warning("技术指标数据验证失败，跳过此步骤")
         else:
@@ -159,18 +158,28 @@ def run_feature_engineering_pipeline():
         # 3. 宏观因子计算
         logger.info("步骤3: 计算宏观因子")
         macro_calculator = MacroFactors(macro_config)
-        df_macro = macro_calculator.process_all_factors(start_date, end_date)
+        df_macro, df_macro_daily = macro_calculator.process_all_factors(
+            start_date=start_date,
+            end_date=end_date,
+            trading_calendar=trading_calendar
+        )
         if not df_macro.empty:
             df_macro.to_csv("../data/features/macro_factors.csv", index=False, encoding='utf-8-sig')
+        if not df_macro_daily.empty:
+            df_macro_daily.to_csv("../data/features/macro_factors_daily.csv", index=False, encoding='utf-8-sig')
+        if not df_macro.empty or not df_macro_daily.empty:
             macro_calculator.save_processing_log("../data/logs/macro_factors_processing_log.json")
             logger.info("宏观因子计算完成")
         
         # 4. EPU因子计算
         logger.info("步骤4: 计算EPU因子")
         epu_calculator = EPUFactors(epu_config)
-        df_epu = epu_calculator.process_all_factors()
+        df_epu, df_epu_daily = epu_calculator.process_all_factors(trading_calendar=trading_calendar)
         if not df_epu.empty:
             df_epu.to_csv("../data/features/epu_factors.csv", index=False, encoding='utf-8-sig')
+        if not df_epu_daily.empty:
+            df_epu_daily.to_csv("../data/features/epu_factors_daily.csv", index=False, encoding='utf-8-sig')
+        if not df_epu.empty or not df_epu_daily.empty:
             epu_calculator.save_processing_log("../data/logs/epu_factors_processing_log.json")
             logger.info("EPU因子计算完成")
         
