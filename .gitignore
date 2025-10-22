@@ -163,6 +163,7 @@ cython_debug/
 .vscode/
 *.code-workspace
 .codebuddy
+.trae
 
 # Data files (exclude large data files but keep small configs)
 data_pipeline/data/*
