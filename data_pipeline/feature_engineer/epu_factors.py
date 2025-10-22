@@ -60,8 +60,8 @@ class EPUFactors:
         try:
             logger.info(f"加载EPU数据: {self.config['epu_file_path']}")
             
-            # 读取EPU Excel文件
-            epu_data = pd.read_excel(self.config['epu_file_path'])
+            # 读取EPU Excel文件 - 使用包含2000年以后数据的sheet
+            epu_data = pd.read_excel(self.config['epu_file_path'], sheet_name='EPU 2000 onwards')
             
             # 清理数据 - 只保留有用的列
             useful_columns = []
