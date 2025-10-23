@@ -1140,7 +1140,7 @@ def main():
         selector = FactorSelection(config)
         
         # 运行选择流程
-        output_file = '../results/factor_selection_results.json'
+        output_file = 'data_pipeline/data/factors/factor_selection_results.json'
         results = selector.run_selection(output_file)
         
         # 输出结果摘要
