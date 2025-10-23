@@ -64,52 +64,175 @@ class FactorSelection:
         try:
             logger.info("加载所有因子数据...")
             
+            # 统一解析数据目录，兼容不同工作目录
+            import os
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            features_dir = os.path.abspath(os.path.join(script_dir, "..", "data", "features"))
+            tech_path = os.path.join(features_dir, "technical_indicators.csv")
+            fundamental_path = os.path.join(features_dir, "fundamental_factors.csv")
+            macro_path = os.path.join(features_dir, "macro_factors.csv")
+            epu_path = os.path.join(features_dir, "epu_factors.csv")
+            
+            # 行情数据（用于收益）
+            prices_path = os.path.abspath(os.path.join(script_dir, "..", "data", "daily_prices", "Merge", "hs300_daily_prices_merged.csv"))
+            
             # 加载技术指标因子
-            tech_factors = pd.read_csv("../data/features/technical_indicators.csv")
+            tech_factors = pd.read_csv(tech_path)
             
             # 加载基本因子
-            fundamental_factors = pd.read_csv("../data/features/fundamental_factors.csv")
+            fundamental_factors = pd.read_csv(fundamental_path)
             
             # 加载宏观因子
-            macro_factors = pd.read_csv("../data/features/macro_factors.csv")
+            macro_factors = pd.read_csv(macro_path)
             
             # 加载EPU因子
-            epu_factors = pd.read_csv("../data/features/epu_factors.csv")
+            epu_factors = pd.read_csv(epu_path)
             
             # 合并所有因子数据
             all_factors = tech_factors.copy()
             
-            # 合并基本因子
+            # 动态解析列名以兼容不同数据源
+            def resolve_col(df, candidates: List[str]) -> Optional[str]:
+                for c in candidates:
+                    if c in df.columns:
+                        return c
+                return None
+            date_candidates = ['日期', 'Date', 'date', 'trade_date', 'dt']
+            code_candidates = ['股票代码', 'ts_code', 'code', '证券代码', 'Symbol', 'stock_code', 'symbol']
+            
+            # all_factors 的日期与代码列名
+            all_date_col = resolve_col(all_factors, date_candidates)
+            all_code_col = resolve_col(all_factors, code_candidates)
+            
+            # 合并基本因子（按可用公共列进行合并）
             if not fundamental_factors.empty:
-                all_factors = pd.merge(all_factors, fundamental_factors, 
-                                     on=['日期', '股票代码'], how='left')
+                fund_date_col = resolve_col(fundamental_factors, date_candidates)
+                fund_code_col = resolve_col(fundamental_factors, code_candidates)
+                merge_cols = []
+                if all_date_col and fund_date_col:
+                    # 统一日期类型
+                    fundamental_factors[fund_date_col] = pd.to_datetime(fundamental_factors[fund_date_col], errors='coerce')
+                    all_factors[all_date_col] = pd.to_datetime(all_factors[all_date_col], errors='coerce')
+                    merge_cols.append((all_date_col, fund_date_col))
+                if all_code_col and fund_code_col:
+                    merge_cols.append((all_code_col, fund_code_col))
+                if merge_cols:
+                    # 构造左右键名映射后合并
+                    left_on = [l for l, _ in merge_cols]
+                    right_on = [r for _, r in merge_cols]
+                    all_factors = pd.merge(all_factors, fundamental_factors, left_on=left_on, right_on=right_on, how='left')
+                else:
+                    logger.warning('基本因子缺少可用于合并的公共列，已跳过合并。')
             
-            # 合并宏观因子（需要处理日期格式）
+            # 合并宏观因子（按日期 asof 合并）
             if not macro_factors.empty:
-                macro_factors['日期'] = pd.to_datetime(macro_factors['日期'])
-                all_factors['日期'] = pd.to_datetime(all_factors['日期'])
-                all_factors = pd.merge_asof(all_factors.sort_values('日期'), 
-                                          macro_factors.sort_values('日期'), 
-                                          on='日期', direction='backward')
+                macro_date_col = resolve_col(macro_factors, date_candidates)
+                if all_date_col and macro_date_col:
+                    macro_factors[macro_date_col] = pd.to_datetime(macro_factors[macro_date_col], errors='coerce')
+                    all_factors[all_date_col] = pd.to_datetime(all_factors[all_date_col], errors='coerce')
+                    all_factors = pd.merge_asof(
+                        all_factors.sort_values(all_date_col),
+                        macro_factors.sort_values(macro_date_col),
+                        left_on=all_date_col,
+                        right_on=macro_date_col,
+                        direction='backward'
+                    )
+                else:
+                    logger.warning('宏观因子缺少日期列，已跳过合并。')
             
-            # 合并EPU因子
+            # 合并EPU因子（按日期 asof 合并）
             if not epu_factors.empty:
-                epu_factors['日期'] = pd.to_datetime(epu_factors['日期'])
-                all_factors = pd.merge_asof(all_factors.sort_values('日期'), 
-                                          epu_factors.sort_values('日期'), 
-                                          on='日期', direction='backward')
+                epu_date_col = resolve_col(epu_factors, date_candidates)
+                if all_date_col and epu_date_col:
+                    epu_factors[epu_date_col] = pd.to_datetime(epu_factors[epu_date_col], errors='coerce')
+                    all_factors[all_date_col] = pd.to_datetime(all_factors[all_date_col], errors='coerce')
+                    all_factors = pd.merge_asof(
+                        all_factors.sort_values(all_date_col),
+                        epu_factors.sort_values(epu_date_col),
+                        left_on=all_date_col,
+                        right_on=epu_date_col,
+                        direction='backward'
+                    )
+                else:
+                    logger.warning('EPU因子缺少日期列，已跳过合并。')
             
-            # 提取收益数据（假设收益率列名为'收益率'）
-            if '收益率' in all_factors.columns:
-                returns = all_factors['收益率']
-                factors = all_factors.drop(columns=['收益率', '日期', '股票代码'], errors='ignore')
+            # 合并行情数据以获得收益
+            try:
+                price_df = pd.read_csv(prices_path)
+                price_date_col = resolve_col(price_df, date_candidates + ['date'])
+                price_code_col = resolve_col(price_df, code_candidates)
+                if price_date_col is None or price_code_col is None:
+                    logger.warning('行情数据缺少日期或代码列，跳过收益合并。')
+                else:
+                    # 统一日期
+                    price_df[price_date_col] = pd.to_datetime(price_df[price_date_col], errors='coerce')
+                    all_factors[all_date_col] = pd.to_datetime(all_factors[all_date_col], errors='coerce')
+                    
+                    # 统一代码格式：保留6位数字，不含交易所后缀
+                    def normalize_code_series(s: pd.Series) -> pd.Series:
+                        return s.astype(str).str.extract(r'(\d+)')[0].str[-6:].str.zfill(6)
+                    price_df[price_code_col] = normalize_code_series(price_df[price_code_col])
+                    all_factors[all_code_col] = normalize_code_series(all_factors[all_code_col])
+                    
+                    # 选择可用的收益列（优先 change_rate, 次选 pct_chg 等）
+                    price_return_candidates = ['change_rate', 'pct_chg', 'return', 'ret', 'daily_return', '收益率']
+                    price_ret_col = resolve_col(price_df, price_return_candidates)
+                    if price_ret_col is None:
+                        logger.warning('行情数据中未发现收益列（如 change_rate/pct_chg），仅合并价格列将无法做相关性/互信息。')
+                        cols_to_merge = [price_date_col, price_code_col]
+                    else:
+                        cols_to_merge = [price_date_col, price_code_col, price_ret_col]
+                    
+                    # 合并（精确匹配日期+代码）
+                    all_factors = pd.merge(
+                        all_factors,
+                        price_df[cols_to_merge].rename(columns={price_date_col: all_date_col, price_code_col: all_code_col}),
+                        on=[all_date_col, all_code_col],
+                        how='left'
+                    )
+                    
+                    # 诊断信息：收益列存在性与非空计数
+                    diag_ret_col = resolve_col(all_factors, ['change_rate', 'pct_chg', 'return', 'ret', 'daily_return', '收益率'])
+                    if diag_ret_col:
+                        non_null = all_factors[diag_ret_col].notna().sum()
+                        logger.info(f"收益列 '{diag_ret_col}' 已合并，非空样本数: {non_null}")
+                    else:
+                        logger.warning('合并后仍未找到收益列。')
+            except FileNotFoundError:
+                logger.warning('未找到行情文件，跳过收益合并。')
+            except Exception as e:
+                logger.warning(f'合并行情收益失败：{e}')
+            
+            # 提取收益数据（兼容不同列名）
+            return_candidates = ['收益率', 'return', 'ret', 'daily_return', 'pct_chg', 'change_rate']
+            return_col = resolve_col(all_factors, return_candidates)
+            if return_col:
+                returns = all_factors[return_col]
+                drop_cols = [return_col]
             else:
                 returns = None
-                factors = all_factors.drop(columns=['日期', '股票代码'], errors='ignore')
+                drop_cols = []
+            # 删除通用的非因子列（使用已解析的列名）
+            for c in [all_date_col, all_code_col]:
+                if c:
+                    drop_cols.append(c)
+            factors = all_factors.drop(columns=drop_cols, errors='ignore')
             
             # 清理数据
             factors = factors.dropna(axis=1, how='all')  # 删除全空列
-            factors = factors.fillna(method='ffill').fillna(method='bfill')  # 填充空值
+            factors = factors.ffill().bfill()  # 填充空值（兼容未来版本）
+            
+            # 仅保留数值型因子，且强制数值化（无法转换的置为NaN后再填充/删除）
+            for col in factors.columns:
+                if not pd.api.types.is_numeric_dtype(factors[col]):
+                    factors[col] = pd.to_numeric(factors[col], errors='coerce')
+            # 再次删除全空列，并填充缺失值
+            factors = factors.dropna(axis=1, how='all').ffill().bfill()
+            
+            # 保证收益为数值型
+            if returns is not None:
+                returns = pd.to_numeric(returns, errors='coerce')
+                returns = returns.ffill().bfill()
             
             self._log_step('load_all_factors', {
                 'total_factors': len(factors.columns),
@@ -198,13 +321,43 @@ class FactorSelection:
         try:
             logger.info("进行主成分分析...")
             
-            # 数据标准化
+            # 复制并清洗特征，确保无 NaN/Inf/极端值后再标准化
+            X = factors.copy()
+            # 数值化与替换无穷
+            for col in X.columns:
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+            X.replace([np.inf, -np.inf], np.nan, inplace=True)
+            
+            # 分位数截断缓解极端值
+            q_low, q_high = 0.01, 0.99
+            for col in X.columns:
+                s = X[col]
+                if s.notna().sum() == 0:
+                    continue
+                lo = s.quantile(q_low)
+                hi = s.quantile(q_high)
+                X[col] = s.clip(lower=lo, upper=hi)
+            
+            # 用中位数填充，删除零方差列
+            med = X.median(numeric_only=True)
+            for col in list(X.columns):
+                if X[col].notna().sum() == 0:
+                    X.drop(columns=[col], inplace=True)
+                else:
+                    X[col] = X[col].fillna(med.get(col, 0))
+            nunique = X.nunique()
+            zero_var = nunique[nunique <= 1].index.tolist()
+            if zero_var:
+                X.drop(columns=zero_var, inplace=True)
+                logger.info(f"PCA前删除零方差列: {len(zero_var)}")
+            
+            # 标准化
             scaler = StandardScaler()
-            factors_scaled = scaler.fit_transform(factors)
+            X_scaled = scaler.fit_transform(X)
             
             # 进行PCA
             pca = PCA()
-            pca_result = pca.fit(factors_scaled)
+            pca_result = pca.fit(X_scaled)
             
             # 计算累计方差解释
             cumulative_variance = np.cumsum(pca_result.explained_variance_ratio_)
@@ -215,7 +368,7 @@ class FactorSelection:
             # 获取主成分载荷
             loadings = pd.DataFrame(
                 pca_result.components_[:n_components].T,
-                index=factors.columns,
+                index=X.columns,
                 columns=[f'PC{i+1}' for i in range(n_components)]
             )
             
@@ -230,7 +383,7 @@ class FactorSelection:
             self._log_step('pca_analysis', {
                 'original_dimensions': factors.shape[1],
                 'reduced_dimensions': n_components,
-                'variance_explained': cumulative_variance[n_components-1]
+                'variance_explained': float(cumulative_variance[n_components-1])
             })
             
             return pca_results
@@ -253,16 +406,78 @@ class FactorSelection:
         try:
             logger.info("进行特征重要性分析...")
             
+            # 深拷贝并统一为数值，处理无穷与极端值
+            X = factors.copy()
+            y = returns.copy() if returns is not None else None
+            
+            # 将所有列转为数值型（无法转换的设为 NaN）
+            for col in X.columns:
+                X[col] = pd.to_numeric(X[col], errors='coerce')
+            # 替换无穷为 NaN
+            X.replace([np.inf, -np.inf], np.nan, inplace=True)
+            
+            # 分位数截断（winsorize）以缓解异常值影响
+            q_low, q_high = 0.01, 0.99
+            for col in X.columns:
+                series = X[col]
+                if series.notna().sum() == 0:
+                    continue
+                low = series.quantile(q_low)
+                high = series.quantile(q_high)
+                X[col] = series.clip(lower=low, upper=high)
+            
+            # 用中位数填充缺失；全缺失列则删除
+            medians = X.median(numeric_only=True)
+            for col in list(X.columns):
+                if X[col].notna().sum() == 0:
+                    X.drop(columns=[col], inplace=True)
+                else:
+                    X[col] = X[col].fillna(medians.get(col, 0))
+            
+            # 删除零方差列（常数列）
+            nunique = X.nunique()
+            zero_var_cols = nunique[nunique <= 1].index.tolist()
+            if zero_var_cols:
+                X.drop(columns=zero_var_cols, inplace=True)
+                logger.info(f"已删除零方差列: {len(zero_var_cols)}")
+            
+            # 处理 y（收益）
+            if y is None:
+                logger.warning("收益数据缺失，跳过特征重要性分析并返回空结果")
+                return pd.DataFrame(columns=['factor', 'importance_score'])
+            y = pd.to_numeric(y, errors='coerce')
+            y = y.replace([np.inf, -np.inf], np.nan)
+            if y.notna().sum() == 0:
+                logger.warning("收益数据全部为缺失，跳过特征重要性分析并返回空结果")
+                return pd.DataFrame(columns=['factor', 'importance_score'])
+            y = y.fillna(y.median())
+            
+            # 对齐 X 与 y 的索引并删除残余的缺失行
+            common_index = X.index.intersection(y.index)
+            X = X.loc[common_index]
+            y = y.loc[common_index]
+            # 确保没有非有限值
+            X = X.replace([np.inf, -np.inf], np.nan)
+            invalid_rows = X.isna().any(axis=1)
+            if invalid_rows.any():
+                X = X[~invalid_rows]
+                y = y[~invalid_rows]
+                logger.info(f"已删除含缺失/非有限值的样本行: {invalid_rows.sum()}")
+            
+            # 标准化特征
+            scaler = StandardScaler()
+            X_scaled = scaler.fit_transform(X)
+            
             # 使用互信息进行特征选择
             selector = SelectKBest(score_func=mutual_info_regression, k='all')
-            selector.fit(factors, returns)
+            selector.fit(X_scaled, y)
             
             # 获取特征重要性得分
             importance_scores = selector.scores_
             
             # 创建重要性结果DataFrame
             importance_df = pd.DataFrame({
-                'factor': factors.columns,
+                'factor': X.columns,
                 'importance_score': importance_scores
             }).sort_values('importance_score', ascending=False)
             
@@ -270,9 +485,9 @@ class FactorSelection:
             top_k_factors = importance_df.head(self.config['top_k_factors'])
             
             self._log_step('feature_importance_analysis', {
-                'total_factors': len(factors.columns),
+                'total_factors': len(X.columns),
                 'top_k_selected': len(top_k_factors),
-                'max_importance': importance_scores.max()
+                'max_importance': float(np.nanmax(importance_scores))
             })
             
             return importance_df
@@ -297,22 +512,36 @@ class FactorSelection:
             
             selected_factors = set()
             
-            # 相关性分析选择
-            if 'correlation' in self.config['selection_methods']:
-                corr_results = self.correlation_analysis(factors, returns)
-                high_corr_factors = corr_results.head(self.config['top_k_factors'])['factor'].tolist()
-                selected_factors.update(high_corr_factors)
+            # 相关性分析选择（仅在收益可用时执行）
+            if 'correlation' in self.config['selection_methods'] and returns is not None and pd.api.types.is_numeric_dtype(returns):
+                try:
+                    corr_results = self.correlation_analysis(factors, returns)
+                    high_corr_factors = corr_results.head(self.config['top_k_factors'])['factor'].tolist()
+                    selected_factors.update(high_corr_factors)
+                except Exception as e:
+                    logger.warning(f"相关性分析跳过：{e}")
+            else:
+                logger.warning("收益不可用或非数值，相关性分析已跳过")
             
-            # 特征重要性选择
+            # 特征重要性选择（若收益不可用则 importance_results 为空，自动跳过）
             if 'feature_importance' in self.config['selection_methods']:
                 importance_results = self.feature_importance_analysis(factors, returns)
-                important_factors = importance_results.head(self.config['top_k_factors'])['factor'].tolist()
-                selected_factors.update(important_factors)
+                if not importance_results.empty:
+                    important_factors = importance_results.head(self.config['top_k_factors'])['factor'].tolist()
+                    selected_factors.update(important_factors)
+                else:
+                    logger.warning("特征重要性结果为空，已跳过该步骤")
             
             # PCA分析（用于降维，不直接选择因子）
             if 'pca' in self.config['selection_methods']:
                 pca_results = self.pca_analysis(factors)
                 # PCA主要用于理解数据结构，不直接选择因子
+            
+            # 若因收益不可用，且未选择到任何因子，则退化为方差选 Top-K
+            if not selected_factors:
+                logger.warning("未从相关性/特征重要性中选出因子，将采用方差最大的 Top-K 作为降级方案")
+                variances = factors.var(numeric_only=True).sort_values(ascending=False)
+                selected_factors = set(variances.head(self.config['top_k_factors']).index.tolist())
             
             # 转换为列表并排序
             final_factors = list(selected_factors)

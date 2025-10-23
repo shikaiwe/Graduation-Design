@@ -175,9 +175,9 @@ class FundamentalFactors:
             df = pd.concat(all_financial_data, ignore_index=True)
             df['日期'] = pd.to_datetime(df['日期'])
 
-            # 确保用于筛选的股票代码和DataFrame中的股票代码都是字符串类型，避免不匹配
-            df['股票代码'] = df['股票代码'].astype(str)
-            stock_codes_str = [str(code) for code in stock_codes]
+            # 确保用于筛选的股票代码和DataFrame中的股票代码都是6位字符串（左侧补零），避免不匹配
+            df['股票代码'] = df['股票代码'].astype(str).str.strip().str.zfill(6)
+            stock_codes_str = [str(code).zfill(6) for code in stock_codes]
 
             df = df[df['股票代码'].isin(stock_codes_str)].copy()
 
@@ -263,18 +263,23 @@ class FundamentalFactors:
                 df['净利润_TTM'] = np.nan
 
             # 准备获取报告期末收盘价：使用本地股价数据文件
-            unique_codes = df['股票代码'].dropna().unique().tolist()
+            unique_codes = [str(c).zfill(6) for c in df['股票代码'].dropna().unique().tolist()]
             report_dates_map = df.groupby('股票代码')['日期'].unique().to_dict()
 
             close_records = []
             
-            # 加载本地股价数据文件
+            # 加载本地股价数据文件（优先使用项目内数据路径，其次尝试备用路径）
             try:
-                price_file_path = "e:/Design/Graduation-Design/data_pipeline/data/daily_prices/Merge/hs300_daily_prices_merged.csv"
+                primary_path = Path("data_pipeline/data/daily_prices/Merge/hs300_daily_prices_merged.csv")
+                fallback_path = Path("e:/Design/Graduation-Design/data_pipeline/data/daily_prices/Merge/hs300_daily_prices_merged.csv")
+                price_file_path = primary_path if primary_path.exists() else fallback_path
                 price_data = pd.read_csv(price_file_path, encoding='utf-8-sig')
                 price_data['date'] = pd.to_datetime(price_data['date'])
-                price_data['股票代码'] = price_data['股票代码'].astype(str)
-                logger.info(f"成功加载本地股价数据，共{len(price_data)}行")
+                # 将股票代码标准化为6位字符串，左侧补零，确保与基础数据对齐
+                price_data['股票代码'] = price_data['股票代码'].astype(str).str.strip().str.zfill(6)
+                logger.info(f"成功加载本地股价数据，共{len(price_data)}行，来源: {price_file_path}")
+                # 预计算每只股票的首个交易日，用于识别上市前报告期
+                first_trade_date_per_code = price_data.groupby('股票代码')['date'].min().to_dict()
             except Exception as e:
                 logger.error(f"加载本地股价数据文件失败: {e}")
                 price_data = pd.DataFrame()
@@ -294,6 +299,13 @@ class FundamentalFactors:
                             logger.warning(f"股票{code}在本地股价数据中未找到")
                             continue
                         
+                        # 上市首日（用于判断报告期是否早于上市）
+                        first_trade_date = first_trade_date_per_code.get(str(code))
+                        if pd.notna(first_trade_date) and rd < first_trade_date:
+                            # 报告期早于上市日期：此类报告期没有可对齐的收盘价，跳过并提示一次
+                            logger.debug(f"股票{code}报告期{rd}早于上市首日{first_trade_date}，跳过对齐")
+                            continue
+                        
                         # 找到>=报告期末的首个交易日
                         sub = stock_price_data[stock_price_data['date'] >= rd].sort_values('date').head(1)
                         if not sub.empty and 'close' in sub.columns:
@@ -302,7 +314,7 @@ class FundamentalFactors:
                             
                             # 检查时间对齐是否合理（报告期与交易日差距不应过大）
                             days_diff = (close_date - rd).days
-                            if days_diff > 30:  # 如果差距超过30天，可能数据有问题
+                            if days_diff > 90:  # 放宽到90天，同时对极端差距打印warning
                                 logger.warning(f"股票{code}报告期{rd}与交易日{close_date}时间差距过大: {days_diff}天")
                                 continue
                                 
@@ -353,10 +365,28 @@ class FundamentalFactors:
                     value_data = ak.stock_value_em(symbol=code)
                     
                     if not value_data.empty:
-                        # 确保日期列存在并转换为日期类型
+                        # 规范化列名：去空格、统一中英文括号、半角/全角，提升兼容性
+                        normalized_cols = []
+                        for col in value_data.columns:
+                            c = str(col)
+                            c = c.replace('（', '(').replace('）', ')')
+                            c = c.replace(' ', '')
+                            normalized_cols.append(c)
+                        value_data.columns = normalized_cols
+
+                        # 将日期列标准化为“日期”
+                        date_candidates = ['日期', '数据日期', '交易日期', 'date', 'Date']
+                        for dc in date_candidates:
+                            if dc in value_data.columns:
+                                if dc != '日期':
+                                    value_data = value_data.rename(columns={dc: '日期'})
+                                break
+
                         if '日期' in value_data.columns:
-                            value_data['日期'] = pd.to_datetime(value_data['日期']).dt.strftime('%Y-%m-%d')
-                        logger.info(f"成功获取股票{code}的估值数据，共{len(value_data)}条记录")
+                            value_data['日期'] = pd.to_datetime(value_data['日期'], errors='coerce').dt.strftime('%Y-%m-%d')
+
+                        # 打印一次列名，便于排查字段不匹配问题
+                        logger.info(f"stock_value_em({code}) columns: {list(value_data.columns)}; rows={len(value_data)}")
                         return value_data
                     else:
                         logger.warning(f"股票{code}的估值数据为空")
@@ -383,52 +413,70 @@ class FundamentalFactors:
                         stock_dates = df[df['股票代码'] == code]['日期'].unique()
                         
                         for report_date in stock_dates:
-                            # 查找最接近报告期的估值数据
-                            if '日期' in value_data.columns:
-                                # 转换报告期为字符串格式以便比较
-                                report_date_str = pd.to_datetime(report_date).strftime('%Y-%m-%d')
+                            # 查找最接近报告期的估值数据（兼容多种日期列名）
+                            date_col_candidates = ['日期', '交易日期', 'date', 'Date']
+                            date_col = next((c for c in date_col_candidates if c in value_data.columns), None)
+                            if date_col is None:
+                                logger.debug(f"股票{code}估值数据缺少日期列，候选未命中: {date_col_candidates}")
+                                continue
+
+                            # 转换报告期为字符串格式以便比较
+                            report_date_str = pd.to_datetime(report_date).strftime('%Y-%m-%d')
+
+                            # 将估值数据日期转为日期字符串用于比较（若还未转换）
+                            try:
+                                value_data[date_col] = pd.to_datetime(value_data[date_col]).dt.strftime('%Y-%m-%d')
+                            except Exception:
+                                logger.debug(f"股票{code}估值数据日期列转换失败: {date_col}")
+                                continue
+                            
+                            # 筛选在报告期之前或等于报告期的记录
+                            valid_dates = value_data[value_data[date_col] <= report_date_str]
+                            
+                            if not valid_dates.empty:
+                                # 获取最接近报告期的记录（按日期排序后取最后一条）
+                                valid_dates = valid_dates.sort_values(by=date_col)
+                                closest_record = valid_dates.iloc[-1]
                                 
-                                # 筛选在报告期之前或等于报告期的记录
-                                valid_dates = value_data[value_data['日期'] <= report_date_str]
+                                # 计算日期差距
+                                date_diff = (pd.to_datetime(report_date_str) - 
+                                            pd.to_datetime(closest_record[date_col])).days
                                 
-                                if not valid_dates.empty:
-                                    # 获取最接近报告期的记录
-                                    closest_record = valid_dates.iloc[-1]
-                                    
-                                    # 计算日期差距
-                                    date_diff = (pd.to_datetime(report_date_str) - 
-                                                pd.to_datetime(closest_record['日期'])).days
-                                    
-                                    # 如果差距在合理范围内（30天内），则使用该数据
-                                    if date_diff <= 30:
-                                        # 更新对应报告期的估值指标
-                                        mask = (df['股票代码'] == code) & (df['日期'] == report_date)
-                                        
-                                        # 映射东方财富接口返回的字段到自定义字段
-                                        field_mapping = {
-                                            '市盈率(TTM)': 'PE_TTM_em',
-                                            '市盈率(静)': 'PE静_em',
-                                            '市净率': '市净率_em',
-                                            'PEG': 'PEG值_em',
-                                            '市现率': '市现率_em',
-                                            '市销率': '市销率_em',
-                                            '总市值': '总市值_em',
-                                            '流通市值': '流通市值_em',
-                                            '总股本': '总股本_em',
-                                            '流通股本': '流通股本_em'
-                                        }
-                                        
-                                        for source_field, target_field in field_mapping.items():
-                                            if source_field in closest_record.index and pd.notna(closest_record[source_field]):
+                                # 如果差距在合理范围内（放宽到120天），则使用该数据
+                                if date_diff <= 120:
+                                    # 更新对应报告期的估值指标
+                                    mask = (df['股票代码'] == code) & (df['日期'] == report_date)
+                                    # 映射东方财富接口返回的字段到自定义字段（兼容多候选名）
+                                    multi_field_mapping = {
+                                        ('市盈率(TTM)', 'PE(TTM)', '滚动市盈率', 'PE_TTM'): 'PE_TTM_em',
+                                        ('市盈率(静)', 'PE(静)', '静态市盈率', 'PE_静'): 'PE静_em',
+                                        ('市净率', 'PB', 'PB(市净率)'): '市净率_em',
+                                        ('PEG', 'PEG值'): 'PEG值_em',
+                                        ('市现率', 'PCF', 'P/CF'): '市现率_em',
+                                        ('市销率', 'PS', 'P/S'): '市销率_em',
+                                        ('总市值', '总市值(元)', '总市值_元'): '总市值_em',
+                                        ('流通市值', '流通市值(元)', '流通市值_元'): '流通市值_em',
+                                        ('总股本', '总股本(股)', '总股本_股'): '总股本_em',
+                                        ('流通股本', '流通股本(股)', '流通股本_股'): '流通股本_em'
+                                    }
+
+                                    for source_field_candidates, target_field in multi_field_mapping.items():
+                                        matched = False
+                                        for candidate in source_field_candidates:
+                                            if candidate in closest_record.index and pd.notna(closest_record[candidate]):
                                                 try:
-                                                    value = float(closest_record[source_field])
+                                                    value = float(closest_record[candidate])
                                                     df.loc[mask, target_field] = value
+                                                    matched = True
+                                                    break
                                                 except (ValueError, TypeError):
-                                                    logger.warning(f"股票{code}报告期{report_date}字段{source_field}值转换失败")
-                                        
-                                        logger.info(f"股票{code}报告期{report_date}使用东方财富估值数据（日期差:{date_diff}天）")
-                                    else:
-                                        logger.warning(f"股票{code}报告期{report_date}无合适的估值数据，最近数据日期差:{date_diff}天")
+                                                    logger.warning(f"股票{code}报告期{report_date}字段{candidate}值转换失败")
+                                        if not matched:
+                                            logger.debug(f"股票{code}报告期{report_date}未匹配到{target_field}的任何候选列: {source_field_candidates}")
+
+                                    logger.info(f"股票{code}报告期{report_date}使用东方财富估值数据（日期差:{date_diff}天）")
+                                else:
+                                    logger.debug(f"股票{code}报告期{report_date_str}最近估值数据距今{date_diff}天，超出阈值")
                 except Exception as e:
                     logger.warning(f"处理股票{code}估值数据失败: {e}")
             
