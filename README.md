@@ -9,6 +9,12 @@
 - 特征工程主流程（技术指标、基本面、宏观、EPU 因子、因子选择）
 - 标准化目录结构与产出文件命名规范
 - 面向生产的可配置与可追溯处理日志
+- **性能优化特性**：
+  - 🚀 **数据加载缓存机制** - 自动缓存加载的因子数据，避免重复IO操作
+  - ⚡ **并行处理分析策略** - 多线程并行执行不同分析策略，提升处理效率
+  - 💾 **分析结果缓存机制** - 缓存分析结果，相同输入直接返回缓存结果
+  - 🔢 **向量化操作优化** - 使用NumPy向量化操作替代循环，提升计算性能
+  - 🧠 **内存使用优化** - 智能内存监控和优化，支持大数据集处理
 
 ## 系统架构
 ```mermaid
@@ -126,6 +132,124 @@ python cli.py --verbose
 ```powershell
 cd data_pipeline\feature_engineer
 python main.py
+```
+
+## 性能优化功能使用说明
+
+### 因子选择优化功能
+
+#### 基本使用示例
+```python
+from data_pipeline.feature_engineer.factor_selection import (
+    FactorSelectionConfig, FactorSelectionMethod, FactorSelection
+)
+
+# 创建配置
+config = FactorSelectionConfig(
+    data_paths={
+        'technical': 'data/features/technical_indicators.csv',
+        'fundamental': 'data/features/fundamental_factors.csv',
+        'macro': 'data/features/macro_factors_daily.csv',
+        'epu': 'data/features/epu_factors_daily.csv',
+        'prices': 'data/daily_prices/Merge/hs300_daily_prices_merged.csv'
+    },
+    selection_methods=[
+        FactorSelectionMethod.VARIANCE,
+        FactorSelectionMethod.CORRELATION,
+        FactorSelectionMethod.PCA,
+        FactorSelectionMethod.FEATURE_IMPORTANCE
+    ],
+    cache_enabled=True,
+    parallel_processing=True
+)
+
+# 创建因子选择器
+factor_selector = FactorSelection(config)
+
+# 执行因子选择（自动使用所有优化功能）
+results = factor_selector.run_selection()
+
+print(f"选择的因子数量: {results['final_factors_count']}")
+print(f"分析的总因子数量: {results['total_factors_analyzed']}")
+print(f"执行时间: {results['processing_log']['execution_time_seconds']:.2f}秒")
+```
+
+#### 性能优化配置选项
+```python
+# 高级配置示例
+config = FactorSelectionConfig(
+    data_paths={...},  # 同上
+    selection_methods=[...],  # 同上
+    
+    # 缓存配置
+    cache_enabled=True,
+    cache_dir='data_pipeline/cache',
+    cache_ttl_hours=24,  # 缓存有效期24小时
+    
+    # 并行处理配置
+    parallel_processing=True,
+    max_workers=4,  # 最大并行工作线程数
+    
+    # 内存优化配置
+    memory_monitor_enabled=True,
+    memory_threshold_mb=2000,  # 内存阈值2GB
+    
+    # 各分析策略参数
+    variance_threshold=0.01,  # 方差阈值
+    correlation_threshold=0.7,  # 相关性阈值
+    pca_variance_threshold=0.95,  # PCA方差解释阈值
+    feature_importance_top_k=10  # 特征重要性Top-K
+)
+```
+
+### 性能测试和监控
+
+#### 运行性能测试
+```powershell
+# 运行优化测试脚本
+python test_optimization.py
+```
+
+测试脚本会输出：
+- 缓存加速比（通常可达300倍以上）
+- 内存使用情况（峰值内存和增量）
+- 各优化功能验证结果
+- 执行时间和选择的因子数量
+
+#### 监控内存使用
+系统会自动监控内存使用情况，当内存超过阈值时会：
+1. 发出警告日志
+2. 自动清理临时数据
+3. 执行垃圾回收
+4. 优化DataFrame内存使用（数值类型下转换、字符串分类化）
+
+### 缓存管理
+
+#### 查看缓存文件
+```powershell
+# 查看缓存目录
+ls data_pipeline/cache/
+```
+
+#### 清理缓存
+```python
+from data_pipeline.feature_engineer.factor_selection import CacheManager
+
+# 清理所有缓存
+cache_manager = CacheManager()
+cache_manager.clear_all_cache()
+
+# 清理过期缓存（超过TTL）
+cache_manager.clear_expired_cache()
+```
+
+#### 禁用缓存（用于调试）
+```python
+config = FactorSelectionConfig(
+    cache_enabled=False,  # 禁用缓存
+    parallel_processing=False,  # 禁用并行处理
+    # ... 其他配置
+)
 ```
 
 关键配置位置（示例，位于 `main.py` 顶部区域）：

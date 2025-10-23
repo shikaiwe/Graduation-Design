@@ -167,6 +167,7 @@ cython_debug/
 
 # Data files (exclude large data files but keep small configs)
 data_pipeline/data/*
+data_pipeline/cache/*
 !data_pipeline/data/.gitkeep
 
 # Large files
